@@ -3,10 +3,42 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <limits.h>
 
-/* ========== READ LINE ========== */
+/* ================= CONFIG ================= */
 
 #define LSH_RL_BUFSIZE 1024
+#define LSH_TOK_BUFSIZE 64
+#define LSH_TOK_DELIM " \t\r\n\a"
+#define HISTORY_SIZE 100
+
+/* ================= HISTORY ================= */
+
+char *history[HISTORY_SIZE];
+int history_count = 0;
+
+void add_history(char *line) {
+    if (history_count < HISTORY_SIZE) {
+        history[history_count++] = strdup(line);
+    }
+}
+
+void show_history() {
+    for (int i = 0; i < history_count; i++) {
+        printf("%d  %s\n", i + 1, history[i]);
+    }
+}
+
+/* ================= PROMPT ================= */
+
+void print_prompt() {
+    char cwd[PATH_MAX];
+    getcwd(cwd, sizeof(cwd));
+    printf("\033[1;32mlsh\033[0m:\033[1;34m%s\033[0m$ ", cwd);
+}
+
+/* ================= READ LINE ================= */
+
 char *lsh_read_line(void) {
     int bufsize = LSH_RL_BUFSIZE;
     int position = 0;
@@ -15,10 +47,12 @@ char *lsh_read_line(void) {
 
     while (1) {
         c = getchar();
+
         if (c == EOF || c == '\n') {
             buffer[position] = '\0';
             return buffer;
         }
+
         buffer[position++] = c;
 
         if (position >= bufsize) {
@@ -28,10 +62,7 @@ char *lsh_read_line(void) {
     }
 }
 
-/* ========== PARSER ========== */
-
-#define LSH_TOK_BUFSIZE 64
-#define LSH_TOK_DELIM " \t\r\n\a"
+/* ================= PARSER ================= */
 
 char **lsh_split_line(char *line) {
     int bufsize = LSH_TOK_BUFSIZE, position = 0;
@@ -41,10 +72,12 @@ char **lsh_split_line(char *line) {
     token = strtok(line, LSH_TOK_DELIM);
     while (token != NULL) {
         tokens[position++] = token;
+
         if (position >= bufsize) {
             bufsize += LSH_TOK_BUFSIZE;
             tokens = realloc(tokens, bufsize * sizeof(char*));
         }
+
         token = strtok(NULL, LSH_TOK_DELIM);
     }
 
@@ -52,19 +85,44 @@ char **lsh_split_line(char *line) {
     return tokens;
 }
 
-/* ========== BUILTINS ========== */
+/* ================= BUILTINS ================= */
 
 int lsh_cd(char **args) {
     if (args[1] == NULL)
-        fprintf(stderr, "lsh: expected argument\n");
+        fprintf(stderr, "lsh: expected argument to cd\n");
     else
         chdir(args[1]);
     return 1;
 }
 
+int lsh_pwd(char **args) {
+    char cwd[PATH_MAX];
+    getcwd(cwd, sizeof(cwd));
+    printf("%s\n", cwd);
+    return 1;
+}
+
+int lsh_echo(char **args) {
+    for (int i = 1; args[i] != NULL; i++)
+        printf("%s ", args[i]);
+    printf("\n");
+    return 1;
+}
+
+int lsh_clear(char **args) {
+    system("clear");
+    return 1;
+}
+
+int lsh_history(char **args) {
+    show_history();
+    return 1;
+}
+
 int lsh_help(char **args) {
-    printf("Simple C Shell\n");
-    printf("Builtins: cd, help, exit\n");
+    printf("LSH - Learning Shell\n");
+    printf("Builtins:\n");
+    printf("  cd, pwd, echo, clear, history, help, exit\n");
     return 1;
 }
 
@@ -72,20 +130,33 @@ int lsh_exit(char **args) {
     return 0;
 }
 
-char *builtin_str[] = {"cd", "help", "exit"};
-int (*builtin_func[]) (char **) = {&lsh_cd, &lsh_help, &lsh_exit};
+/* builtin registry */
+char *builtin_str[] = {
+    "cd", "pwd", "echo", "clear", "history", "help", "exit"
+};
+
+int (*builtin_func[]) (char **) = {
+    &lsh_cd,
+    &lsh_pwd,
+    &lsh_echo,
+    &lsh_clear,
+    &lsh_history,
+    &lsh_help,
+    &lsh_exit
+};
 
 int lsh_num_builtins() {
     return sizeof(builtin_str) / sizeof(char *);
 }
 
-/* ========== PROCESS EXEC ========== */
+/* ================= EXECUTION ================= */
 
-int lsh_launch(char **args) {
+int lsh_launch(char **args, int background) {
     pid_t pid;
     int status;
 
     pid = fork();
+
     if (pid == 0) {
         execvp(args[0], args);
         perror("lsh");
@@ -95,27 +166,42 @@ int lsh_launch(char **args) {
         perror("lsh");
     }
     else {
-        do {
-            waitpid(pid, &status, WUNTRACED);
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        if (!background) {
+            do {
+                waitpid(pid, &status, WUNTRACED);
+            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        } else {
+            printf("[bg] process started pid=%d\n", pid);
+        }
     }
+
     return 1;
 }
 
-/* ========== EXECUTOR ========== */
+/* ================= EXECUTOR ================= */
 
 int lsh_execute(char **args) {
     if (args[0] == NULL)
         return 1;
 
-    for (int i = 0; i < lsh_num_builtins(); i++)
+    /* background execution */
+    int background = 0;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "&") == 0) {
+            background = 1;
+            args[i] = NULL;
+        }
+    }
+
+    for (int i = 0; i < lsh_num_builtins(); i++) {
         if (strcmp(args[0], builtin_str[i]) == 0)
             return (*builtin_func[i])(args);
+    }
 
-    return lsh_launch(args);
+    return lsh_launch(args, background);
 }
 
-/* ========== LOOP ========== */
+/* ================= LOOP ================= */
 
 void lsh_loop(void) {
     char *line;
@@ -123,17 +209,21 @@ void lsh_loop(void) {
     int status;
 
     do {
-        printf("> ");
+        print_prompt();
+
         line = lsh_read_line();
+        add_history(line);
+
         args = lsh_split_line(line);
         status = lsh_execute(args);
 
         free(line);
         free(args);
+
     } while (status);
 }
 
-/* ========== MAIN ========== */
+/* ================= MAIN ================= */
 
 int main() {
     lsh_loop();
